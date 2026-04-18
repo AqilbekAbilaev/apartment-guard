@@ -9,6 +9,7 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
 DB_PATH = "apartment.db"
+SKIP_ACTIVATION = os.getenv("SKIP_ACTIVATION", "false").lower() == "true"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -81,6 +82,8 @@ async def get_registered_count(chat_id: int) -> int:
 # --- ACTIVATION CHECK ---
 
 async def is_activated(context, chat_id: int) -> bool:
+    if SKIP_ACTIVATION:
+        return True
     total = await context.bot.get_chat_member_count(chat_id)
     registered = await get_registered_count(chat_id)
     return registered >= (total - 1)  # subtract bot itself
