@@ -114,6 +114,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Available commands:\n\n"
+        "/start — Register yourself in the apartment\n"
+        "/trash — Trigger trash duty rotation\n"
+        "/help — Show this message"
+    )
+
+
 async def trash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
@@ -194,6 +203,7 @@ def main():
     application = Application.builder().token(TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("trash", trash_command))
     application.add_handler(CallbackQueryHandler(trash_claim_button, pattern=r"^trash_claim:"))
     application.add_handler(CallbackQueryHandler(trash_confirm_button, pattern=r"^trash_confirm:"))
