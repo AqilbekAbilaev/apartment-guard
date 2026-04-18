@@ -61,7 +61,7 @@ async def register_member(chat_id: int, user_id: int, username: str):
         await db.commit()
 
 
-async def get_members(chat_id: int) -> list[tuple]:
+async def get_members(chat_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT user_id, username FROM members WHERE chat_id = ?", (chat_id,)
