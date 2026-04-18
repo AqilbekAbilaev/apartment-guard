@@ -36,7 +36,7 @@ async def init_db():
         await db.commit()
 
 
-async def get_state(chat_id: int, key: str) -> str | None:
+async def get_state(chat_id: int, key: str):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT value FROM state WHERE chat_id = ? AND key = ?", (chat_id, key)
