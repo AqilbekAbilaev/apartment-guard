@@ -3,7 +3,7 @@ import os
 import aiosqlite
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -18,52 +18,62 @@ logging.basicConfig(level=logging.INFO)
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS state (
-                key TEXT PRIMARY KEY,
-                value TEXT
+            CREATE TABLE IF NOT EXISTS members (
+                chat_id INTEGER,
+                user_id INTEGER,
+                username TEXT,
+                PRIMARY KEY (chat_id, user_id)
             )
         """)
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS members (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT
+            CREATE TABLE IF NOT EXISTS state (
+                chat_id INTEGER,
+                key TEXT,
+                value TEXT,
+                PRIMARY KEY (chat_id, key)
             )
         """)
-        await db.execute("INSERT OR IGNORE INTO state VALUES ('trash_index', '0')")
         await db.commit()
 
 
-async def get_state(key: str) -> str:
+async def get_state(chat_id: int, key: str) -> str | None:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT value FROM state WHERE key = ?", (key,)) as cursor:
+        async with db.execute(
+            "SELECT value FROM state WHERE chat_id = ? AND key = ?", (chat_id, key)
+        ) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else None
 
 
-async def set_state(key: str, value: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO state VALUES (?, ?)", (key, value))
-        await db.commit()
-
-
-async def register_member(user_id: int, username: str):
+async def set_state(chat_id: int, key: str, value: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT OR IGNORE INTO members VALUES (?, ?)",
-            (user_id, username)
+            "INSERT OR REPLACE INTO state VALUES (?, ?, ?)", (chat_id, key, value)
         )
         await db.commit()
 
 
-async def get_members() -> list[tuple]:
+async def register_member(chat_id: int, user_id: int, username: str):
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id, username FROM members") as cursor:
+        await db.execute(
+            "INSERT OR IGNORE INTO members VALUES (?, ?, ?)", (chat_id, user_id, username)
+        )
+        await db.commit()
+
+
+async def get_members(chat_id: int) -> list[tuple]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT user_id, username FROM members WHERE chat_id = ?", (chat_id,)
+        ) as cursor:
             return await cursor.fetchall()
 
 
-async def get_member_count() -> int:
+async def get_registered_count(chat_id: int) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT COUNT(*) FROM members") as cursor:
+        async with db.execute(
+            "SELECT COUNT(*) FROM members WHERE chat_id = ?", (chat_id,)
+        ) as cursor:
             row = await cursor.fetchone()
             return row[0]
 
@@ -72,9 +82,8 @@ async def get_member_count() -> int:
 
 async def is_activated(context, chat_id: int) -> bool:
     total = await context.bot.get_chat_member_count(chat_id)
-    registered = await get_member_count()
-    # subtract 1 for the bot itself
-    return registered >= (total - 1)
+    registered = await get_registered_count(chat_id)
+    return registered >= (total - 1)  # subtract bot itself
 
 
 # --- COMMANDS ---
@@ -83,11 +92,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat_id = update.effective_chat.id
 
-    await register_member(user.id, user.username or user.first_name)
+    await register_member(chat_id, user.id, user.username or user.first_name)
 
     total = await context.bot.get_chat_member_count(chat_id)
-    registered = await get_member_count()
-    remaining = (total - 1) - registered  # subtract bot
+    registered = await get_registered_count(chat_id)
+    remaining = (total - 1) - registered
 
     if remaining > 0:
         await update.message.reply_text(
@@ -95,7 +104,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Waiting for {remaining} more member(s) to /start before the bot activates."
         )
     else:
-        members = await get_members()
+        members = await get_members(chat_id)
         names = ", ".join(f"@{m[1]}" for m in members)
         await update.message.reply_text(
             f"🎉 All members registered! Bot is now active.\nMembers: {names}"
@@ -106,7 +115,7 @@ async def trash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     if not await is_activated(context, chat_id):
-        registered = await get_member_count()
+        registered = await get_registered_count(chat_id)
         total = await context.bot.get_chat_member_count(chat_id)
         remaining = (total - 1) - registered
         await update.message.reply_text(
@@ -114,11 +123,11 @@ async def trash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    members = await get_members()
-    trash_index = int(await get_state("trash_index"))
+    members = await get_members(chat_id)
+    trash_index = int(await get_state(chat_id, "trash_index") or 0)
     current_person = members[trash_index % len(members)][1]
 
-    keyboard = [[InlineKeyboardButton("🙋 I took out the trash!", callback_data="trash_claim")]]
+    keyboard = [[InlineKeyboardButton("🙋 I took out the trash!", callback_data=f"trash_claim:{chat_id}")]]
     await update.message.reply_text(
         f"🗑️ The trash is full!\nIt's @{current_person}'s turn.",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -127,9 +136,11 @@ async def trash_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def trash_claim_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    chat_id = int(query.data.split(":")[1])
     presser = (query.from_user.username or "").lower()
-    members = await get_members()
-    trash_index = int(await get_state("trash_index"))
+
+    members = await get_members(chat_id)
+    trash_index = int(await get_state(chat_id, "trash_index") or 0)
     current_person = members[trash_index % len(members)][1]
 
     if presser != current_person.lower():
@@ -139,7 +150,7 @@ async def trash_claim_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
 
     others = [f"@{m[1]}" for m in members if m[1].lower() != current_person.lower()]
-    keyboard = [[InlineKeyboardButton("✅ Confirm!", callback_data="trash_confirm")]]
+    keyboard = [[InlineKeyboardButton("✅ Confirm!", callback_data=f"trash_confirm:{chat_id}")]]
     await query.edit_message_text(
         text=f"@{current_person} says the trash is out! {' '.join(others)} can you confirm?",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -148,9 +159,11 @@ async def trash_claim_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def trash_confirm_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    chat_id = int(query.data.split(":")[1])
     presser = (query.from_user.username or "").lower()
-    members = await get_members()
-    trash_index = int(await get_state("trash_index"))
+
+    members = await get_members(chat_id)
+    trash_index = int(await get_state(chat_id, "trash_index") or 0)
     current_person = members[trash_index % len(members)][1]
 
     if presser == current_person.lower():
@@ -160,7 +173,7 @@ async def trash_confirm_button(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
 
     new_index = (trash_index + 1) % len(members)
-    await set_state("trash_index", str(new_index))
+    await set_state(chat_id, "trash_index", str(new_index))
     next_person = members[new_index][1]
 
     await query.edit_message_text(
@@ -179,8 +192,8 @@ def main():
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("trash", trash_command))
-    application.add_handler(CallbackQueryHandler(trash_claim_button, pattern="trash_claim"))
-    application.add_handler(CallbackQueryHandler(trash_confirm_button, pattern="trash_confirm"))
+    application.add_handler(CallbackQueryHandler(trash_claim_button, pattern=r"^trash_claim:"))
+    application.add_handler(CallbackQueryHandler(trash_confirm_button, pattern=r"^trash_confirm:"))
 
     application.run_polling()
 
